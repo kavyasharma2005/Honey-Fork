@@ -1,0 +1,275 @@
+# AGENTS.md
+
+Repository-specific knowledge for AgentCrash Replay.
+
+## What this repo is
+
+A hackathon MVP (Hacker House Goa 2026) implementing the AgentCrash Replay SRS
+v1.0 + v1.1 addendum: an AI-agent security regression loop
+(attack → enforceable policy → replay → legitimate regression).
+
+## Working repository
+
+- Canonical repo is `Gaurangicodes/honey-fork`, default branch `main`. Land work
+  as a branch + PR against that `main`.
+- `GITHUB_TOKEN` is a GitHub App user-to-server token scoped to this repo only.
+  Writes to any other repo fail with 403 "Resource not accessible by
+  integration", and `git push` reports "Permission ... denied".
+- `vanshikayadav404/Honey-Fork` is a separate repo with unrelated history and is
+  not writable with this token. Do not try to push or cross-PR into it.
+
+## Layout
+
+- `backend/agentcrash/core/` — models, SQLite store, attack library, agent
+  registry, agent runtime, tool registry, policy proxy/compiler, wallet tool,
+  orchestrator.
+- `backend/agentcrash/sandbox/` — chain adapters, sandbox manager, independent
+  verifier.
+- `backend/agentcrash/api/` — FastAPI app (SRS section 7 endpoints).
+- `backend/agentcrash/integrations/` — optional ecosystem adapters (Socket,
+  TigerGraph, Wispr Flow, Dodo Payments). Off by default; see Module 7 notes.
+- `backend/tests/` — pytest suite (`test_agent_module1.py`,
+  `test_sandbox_module2.py`, `test_integrations_module7.py`,
+  `test_pipeline_e2e.py`).
+- `frontend/src/` — dashboard. `types.ts` mirrors the API shapes, `api.ts` is
+  the only place that talks HTTP, `format.ts` owns presentation and
+  `components/` holds the panels. `format.test.ts` covers the pure logic.
+
+## Commands
+
+```bash
+cd backend
+pip install -r requirements.txt
+python -m pytest                                  # 195 tests
+uvicorn agentcrash.api.app:app --port 8123        # run API
+python scripts/demo_flow.py                       # live end-to-end proof (needs API running)
+python -m pyflakes agentcrash tests scripts       # lint
+
+cd ../frontend
+npm install
+npm run dev                                       # dashboard on :12000
+npm run typecheck && npm test && npm run build
+```
+
+## Invariants — do not break these
+
+These are enforced in code and covered by tests. Breaking one is a product bug,
+not a style issue.
+
+1. **A verdict never comes from model text.** Only `OutcomeVerifier` produces a
+   verdict, and only from receipts and verified balance deltas.
+2. **An attack that did not trigger is never labelled blocked.** See
+   `OutcomeVerifier.verify` and the `attack_triggered` flag.
+3. **A fix is Verified only when all hold:** original exploit verified, replay
+   state fingerprint matches, prohibited transaction did not execute, and the
+   legitimate regression transaction succeeded.
+4. **A policy that would block the known legitimate transfer is refused at
+   apply time** (`Orchestrator._assert_no_p0_regression`).
+5. **`TEST_ERROR` is excluded from rate denominators** and counted separately.
+6. **Secrets are redacted at the serialization boundary**
+   (`evidence/redaction.py`).
+7. **An agent can only invoke a tool that is both registered and in its own
+   `tool_set`.** `ToolRegistry.invoke` and `SandboxAgent.gather_observations`
+   return a recorded `ToolCallResult(rejected=True)`; they never raise and never
+   fall through to the tool body. An unregistered-tool attempt is evidence, not
+   a security outcome.
+8. **Tool output is untrusted input.** The agent's instruction channel is the
+   attack payload *plus* the rendered tool observations, which is why AT-01/AT-02
+   can steer the agent through a mock tool. Never treat a tool response as
+   trusted.
+9. **An optional adapter never fabricates a result and never controls
+   anything.** `AdapterResult` raises unless findings carry state `ok`, so a
+   disabled/unconfigured/errored adapter cannot be rendered as a clean scan.
+   Adapters return data only: none can approve a policy, sign a transaction or
+   alter a verdict. The core proof runs with every adapter off (FR-INT-01).
+10. **Voice cannot approve or authorise.** `VOICE_OPERATIONS` contains no
+    apply/sign/transfer operation, and `FORBIDDEN_PATTERNS` refuses such
+    transcripts with an explanation. Do not add an operation that voice could
+    use to move funds or change a policy (FR-INT-04).
+
+## Module 1 notes (agent & attack management)
+
+- Two configurations live in `core/agent_registry.py` and are seeded into the
+  `agent_configs` table by `api/app.py::build_state` (FR-AG-01, FR-AG-02). They
+  are identical except for `guardrail`, which is the documented differentiator.
+- `AgentRegistry.register` rejects a `tool_set` naming a tool the sandbox does
+  not expose, so a stored configuration's tool list is always true at runtime.
+- Attack `tools_used` / `tool_outputs` are how a tool-channel scenario carries
+  its injection (FR-AT-05). AT-01 drives `token.read_metadata`, AT-02 drives
+  `oracle.get_price`; AT-03/AT-04 are text-only.
+- Tool ids are constants in `core/tools.py`. Add a tool there *and* to a
+  configuration's `tool_set` before referencing it in an attack.
+
+## Module 3 notes (policy generation & enforcement)
+
+- `PolicyProxy` is the enforcement boundary. It holds an applied *stack*, not a
+  single policy: an action must satisfy **every** active policy (FR-PL-03), one
+  effective policy per type. Applying an amount cap must never silently drop an
+  earlier recipient allowlist — that regression is covered by
+  `test_stack_blocks_unknown_recipient_even_when_amount_is_fine`.
+- Chain identity is checked *before* any rule, including when no policy is
+  active (SR-06). A transaction aimed at the wrong chain is never submitted.
+- `PolicyRegistry` (`core/policy_registry.py`) owns per-type version numbers and
+  append-only history. Version numbers are per type, so "allowlist v2" is
+  unambiguous alongside "amount v1".
+- `Orchestrator.apply_policy` validates parameters, then dry-runs a legitimate
+  probe against the *resulting stack* before applying. A rule that would block
+  the known legitimate transfer is refused (FR-PL-05, Guardrail B).
+- Only `template_for()`-backed types can be applied. An attack with no supported
+  template returns `None` from the compiler and the API reports "no automatic
+  fix" (FR-PL-06) rather than inventing a generic rule.
+- Replay deliberately runs under the *currently applied* stack. A cap alone does
+  not block AT-01, and the verifier correctly reports `EXPLOIT_SUCCEEDED` /
+  `FAILED` in that case — do not "fix" this into a block.
+
+## Module 4 notes (replay, scoring & reporting)
+
+- The arithmetic lives in `core/reporting.py` as pure functions over run
+  records. `build_report` and the tests both call them, so the numbers in a
+  report cannot drift from the numbers under test (NFR-08).
+- **ASR and DBR are different populations, deliberately.** ASR is measured over
+  unprotected baseline trials ("can this agent be exploited"); DBR over trials
+  with a policy in force ("does the fix work"). Pooling them would let a
+  successful fix hide a still-exploitable agent. `is_protected()` keys off the
+  run's `policy_version`, so a guarded agent with no applied policy is *not*
+  protected.
+- `build_report` pulls in replay runs (children of the attack trials). Without
+  them there are no protected trials, so DBR is `0/0` and the score is
+  unavailable even after a verified fix.
+- `RegressionResult.aggregate` marks the summary written by a repeated replay.
+  It is excluded from the legitimate-task denominator, otherwise a 3x replay
+  reports 4/4. `comparison()` prefers the aggregate since only it carries the
+  before/after rates.
+- Replay receipts (`core/receipts.py`) are persisted as `replay_receipt`
+  evidence on the replay run. `_receipts_for` follows child runs to find them.
+- `replay(repeat_count=N)` re-runs the attack N times and only reports
+  `VERIFIED` when *every* trial blocked the attack and *every* legitimate
+  regression passed (FR-RP-05). One lucky block is not a fix.
+- Exposure is a scenario, not a prediction: it is the largest amount actually
+  observed in the suite, alongside the agent's whole test balance as a worst
+  case. Both are labelled with their assumptions.
+
+## Module 5 notes (dashboard & scan orchestration)
+
+- `POST /scans` is **asynchronous**. It returns `202` with the accepted run and
+  the planned `total_trials`, then runs trials in the background. The dashboard
+  polls `GET /scans/{id}/trials` and `GET /scans/{id}/events`. Tests that need a
+  finished scan must call `/api/scans?wait=true`.
+- The response shapes in `frontend/src/types.ts` are the serialised backend
+  models, not a convenient re-shaping. When a field is renamed in
+  `core/models.py`, the frontend type must change too — the typecheck is the
+  only thing standing between a rename and a silently blank panel.
+- `Policy.version` is a **string** ("1", "2"), and the impact field is
+  `legitimate_task_impact`. `POST /scans/{id}/replay` returns
+  `{replay_run, regression, proof_status, active_stack}` — the receipt is a
+  separate `GET /scans/{id}/receipt` read, and a missing one must not fail the
+  replay the operator just ran.
+- The attack graph (FR-UX-08) is built only from events the backend recorded. A
+  node is drawn only when its event is present, so a blocked run genuinely shows
+  no chain node. Do not add placeholder nodes to make the graph look complete.
+- `formatUnits` / `formatDelta` go through `BigInt`. 18-decimal balances exceed
+  `Number.MAX_SAFE_INTEGER`, so Number arithmetic would display a different
+  figure from the one that was enforced.
+- Selecting a different run must clear the trial selection, otherwise the graph
+  and timeline keep rendering the previous run's evidence.
+- Applying a policy must refetch `/health`; the header's enforced stack comes
+  from there, and nothing else invalidates it.
+
+## Module 6 notes (persistence & evidence management)
+
+- `core/hashing.py` is the **only** place canonical JSON and SHA-256 live.
+  `canonical_hash` is for fingerprints; `integrity_hash` is for record digests
+  and always excludes the record's own `integrity_hash` field, so a digest can
+  be recomputed from the stored body. Do not hand-roll `hashlib.sha256` again —
+  five copies existed before this module and they had drifted.
+- **Every** evidence record is stamped through `Orchestrator._evidence`. The
+  replay receipt previously called `store.save_evidence` directly and was
+  persisted with `integrity_hash=None`, which made the single most important
+  artifact the one record a reader could not check (FR-DB-04).
+- `verify_integrity(record)` recomputes the digest; `GET /api/evidence/integrity`
+  sweeps the store. This detects later modification of a stored record. It is an
+  integrity check, **not** a signature, and the endpoint's `note` says so.
+- Attack definitions are snapshotted into the `attacks` table when a run
+  executes, and the whole library is seeded at startup. `_resolve_attack` reads
+  the in-process library first, then the snapshot. This is what lets a report
+  still name `AT-01@1.0.0` after the library is edited (FR-DB-03). A stored
+  `(attack_id, version)` is never overwritten, and `_suite_descriptors` reports
+  an unresolvable attack as `definition_available: false` rather than dropping
+  it from the suite.
+- Policy versions are per type and **max+1**, not `len()+1`: versions go sparse
+  once a proposal is superseded, and counting reissues a number history already
+  uses. `find_proposed_equivalent` makes proposing the same rule twice return
+  the open proposal instead of minting a version, so the first rule an operator
+  applies reads as v1 rather than v7 (FR-DB-02).
+- **Redaction is context-aware, and that matters.** A bare `0x` + 64 hex value
+  is both a transaction hash and a private key. `redact()` uses the field name:
+  a value under `hash`/`tx`/`transaction`/`digest`/`evidence_id`/`snapshot_id`
+  is preserved as evidence (section 24 requires the dashboard to show it); a
+  value under a credential field is dropped; free text via `redact_text` keeps
+  the strict rule. Blanket-redacting every 64-hex value silently replaced every
+  transaction hash in the UI with `[REDACTED]`.
+- All read endpoints (`/scans`, `/scans/{id}`, `/events`, `/trials`, `/policies`,
+  receipts, agent configs) serialize through the local `_out` helper, so
+  redaction happens at the response boundary rather than only on the report path.
+- Run IDs are unique and never rewritten; a failed run is retained with its
+  error code. `manager.reset()` restores balances and **never** touches stored
+  runs, reports or evidence.
+
+## Module 7 notes (optional ecosystem adapters)
+
+- `integrations/base.py` is the contract. An adapter is constructed always (so
+  the dashboard can show its flag and setup steps) but `enabled` requires both
+  `AGENTCRASH_INTEGRATIONS_ENABLED` and its own flag to be truthy. Presence of a
+  credential alone starts nothing.
+- `AdapterResult.__post_init__` rejects findings on any state but `ok`. That is
+  the structural half of FR-INT-02 — the reason a "not run" adapter can never be
+  presented as a clean scan. Do not weaken it to make a call site simpler.
+- `Integration.unavailable()` is the honest "did not run" path. Every capability
+  method returns it when `state() is not OK`, before touching the network.
+- Socket parses the NDJSON stream by hand (`_parse_ndjson`). Two synthetic alert
+  types matter: `pendingScan` and `notFound`. An unresolved package is reported
+  as a finding, never dropped, because "we could not resolve this" is a real
+  result and must not read as clean.
+- TigerGraph's `build_upsert_payload` projects the **persisted** `RunEvent`
+  shape: a flat envelope (`run_id`, `event_id`, `seq`, `event_type`) with detail
+  nested under `data`. It sorts by `seq`, so input order does not matter, and it
+  attaches a `policy_decision`/`transaction_receipt` to the most recent
+  `tool_call` in that run — the order the orchestrator emitted them in. A
+  blocked trial emits a decision with **no** tool call, so the decision edges
+  from the `Run` (`RUN_HAS_POLICY_DECISION`) rather than from a `ToolCall`, and
+  a blocked trial yields no `Transaction` vertex. Never add placeholder nodes to
+  make the graph look complete (same rule as FR-UX-08).
+- Wispr Flow has no public API. The adapter is a guarded input source: `parse()`
+  recognises and refuses, `execute()` is the only path that marks a command
+  confirmed, and neither can approve a policy. Keep it that way.
+- Dodo is read-only by design (SRS 25, P2). `payment_summary()` reads counts and
+  statuses only — no amounts, no customer emails, no payment ids (NFR-07) — and
+  performs no charge. A key whose prefix disagrees with `DODO_PAYMENTS_MODE` is
+  an error, not a silent redirect to live.
+- Adapter tests inject an `httpx.MockTransport`, so the real request building,
+  NDJSON parsing, projection and error handling run unmodified. Do not replace
+  this with a mock of the adapter's own logic.
+
+## Gotchas
+
+- `SimulatedChain` is the default sandbox; `AnvilChain` is optional and only
+  implements reads. Do not assume a real node is available.
+- Test addresses live in `core/constants.py` and are validated to be exactly 40
+  hex chars at import. Attack payloads interpolate them, so payloads, sandbox
+  accounts and policy templates can never drift apart.
+- Amounts are integers in the token's smallest unit. Never use floats.
+- The `environment` pytest fixture is already initialized to its known initial
+  state (`default_demo_environment` calls `SandboxManager`), so tests can
+  transfer immediately.
+- A scan (parent) run carries no verdict; its trials do. Use
+  `Orchestrator._trials_for` / `_resolve_original_run` to go from a scan id to
+  the runs that actually hold verdicts and snapshots.
+- Run IDs are UUID-suffixed and must stay unique; policy versions are
+  append-only.
+
+## Conventions
+
+- Python 3.13, `from __future__ import annotations`, type hints everywhere.
+- Comments explain non-obvious invariants and ordering. Do not narrate the diff.
+- SRS requirement IDs (FR-SB-03, FR-PL-05, NFR-07, …) are cited in docstrings so
+  code can be traced back to the spec.
