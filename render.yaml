@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: agentcrash-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn agentcrash.api.app:app --host 0.0.0.0 --port $PORT
+    plan: free
+    envVars:
+      - key: EVIDENCE_DB_PATH
+        value: data/agentcrash.db
+      - key: DEFAULT_MAX_TRANSACTION_AMOUNT
+        value: "1000000000000000000000"
+      - key: DEFAULT_REPEAT_COUNT
+        value: "1"
+      - key: CHAIN_RPC_URL
+        value: http://127.0.0.1:8545
+      - key: CHAIN_ID
+        value: "31337"
+      # Integrations are off by default; enable per-adapter as needed.
+      - key: AGENTCRASH_INTEGRATIONS_ENABLED
+        value: "0"
+      # LLM (leave blank unless a real model provider is wired up)
+      - key: LLM_PROVIDER
+        value: ""
+      - key: LLM_MODEL
+        value: ""
+      - key: LLM_API_KEY
+        value: ""
