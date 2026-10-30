@@ -106,6 +106,30 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ run_ids: runIds }),
     }),
+  exportReport: async (reportId: string): Promise<void> => {
+    const res = await fetch(`/api/reports/${reportId}/export`);
+    if (!res.ok) throw new Error("Failed to export report");
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `agentcrash-report-${reportId}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+  },
+  exportRunJson: (data: unknown, filename: string): void => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+  },
 
   resetSandbox: () =>
     request<{ snapshot: unknown }>("/sandbox/reset", { method: "POST" }),

@@ -17,7 +17,7 @@
 | **Module 2** | Sandbox & Transaction Verification (SimulatedChain, resets, fingerprints, verifier) | **DONE** | 16/16 unit tests pass |
 | **Module 3** | Policy Generation & Enforcement (allowlist, max amount, proxy stack, compiler) | **DONE** | 35/35 unit tests pass |
 | **Module 4** | Replay, Regression, Scoring & Reporting (equivalence gate, proof stamp, ASR/DBR) | **DONE** | 28/28 unit tests pass |
-| **Module 5** | Dashboard & Scan Orchestration (background scans, events, graphs, UI) | **DONE** | React Dashboard connected via Vite proxy :12000 -> :8123; typecheck, vitest (10/10), build passed |
+| **Module 5** | Dashboard & Scan Orchestration (background scans, events, graphs, UI) | **DONE** | React Dashboard rebuilt in Apple-minimal glassmorphic design across 3 screens (Dashboard, Run Detail, Fix & Replay); 100% wired to real APIs, sample data removed; typecheck, vitest (10/10), build passed |
 | **Module 6** | Persistence & Evidence Management (SQLite WAL, integrity digests, redaction) | **DONE** | 25/25 unit tests pass |
 | **Module 7** | Partner Integrations (Socket, TigerGraph, Wispr Flow, Dodo Payments) | **DONE** | 29/29 unit tests pass |
 | **E2E Pipeline** | Full pipeline end-to-end integration tests | **DONE** | 39/39 e2e tests pass |

@@ -7,10 +7,14 @@
     color-scheme: dark;
   }
   body {
-    @apply bg-canvas text-ink antialiased;
-    font-feature-settings: "tnum" 1;
+    @apply bg-[#070B12] text-[#E2E8F0] antialiased selection:bg-rose-500/20 selection:text-rose-300 font-sans;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11", "tnum" 1;
+    background-image: 
+      radial-gradient(circle at 15% 15%, rgba(99, 102, 241, 0.08) 0%, transparent 40%),
+      radial-gradient(circle at 85% 20%, rgba(16, 185, 129, 0.06) 0%, transparent 45%),
+      radial-gradient(circle at 50% 85%, rgba(244, 63, 94, 0.05) 0%, transparent 50%);
+    background-attachment: fixed;
   }
-  /* SRS 24: animations must not block reading or interaction. */
   @media (prefers-reduced-motion: reduce) {
     *,
     *::before,
@@ -23,30 +27,50 @@
 }
 
 @layer components {
+  /* Apple-inspired Glassmorphic Panels */
+  .glass-panel {
+    @apply rounded-2xl border border-white/[0.08] bg-white/[0.035] backdrop-blur-2xl shadow-[0_8px_32px_0_rgba(0,0,0,0.36)];
+  }
+  .glass-card {
+    @apply rounded-xl border border-white/[0.07] bg-white/[0.025] hover:bg-white/[0.045] backdrop-blur-xl transition-all duration-200;
+  }
+  .glass-pill {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-white/[0.1] bg-white/[0.05] backdrop-blur-md px-2.5 py-1 text-xs font-medium;
+  }
+  .glass-btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-white/[0.1] bg-white/[0.06] hover:bg-white/[0.12] active:scale-[0.98] px-4 py-2 text-xs font-semibold text-white backdrop-blur-md transition-all disabled:opacity-40 disabled:pointer-events-none;
+  }
+  .glass-btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/15 hover:bg-emerald-500/25 active:scale-[0.98] px-4 py-2 text-xs font-semibold text-emerald-300 backdrop-blur-md shadow-[0_0_20px_rgba(16,185,129,0.18)] transition-all disabled:opacity-40 disabled:pointer-events-none;
+  }
+  .glass-btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-rose-500/40 bg-rose-500/15 hover:bg-rose-500/25 active:scale-[0.98] px-4 py-2 text-xs font-semibold text-rose-300 backdrop-blur-md shadow-[0_0_20px_rgba(244,63,94,0.18)] transition-all disabled:opacity-40 disabled:pointer-events-none;
+  }
+  .glass-input {
+    @apply rounded-xl border border-white/[0.09] bg-white/[0.04] px-3.5 py-2 text-xs text-white placeholder-slate-500 backdrop-blur-md focus:border-white/25 focus:outline-none focus:ring-1 focus:ring-white/20 transition-all;
+  }
+
+  /* Legacy utility classes backward compatibility */
   .panel {
-    @apply rounded-lg border border-edge bg-panel;
+    @apply glass-panel;
   }
   .label {
-    @apply text-[10px] font-semibold uppercase tracking-[0.14em] text-muted;
+    @apply text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400;
   }
   .chip {
-    @apply inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-[11px] font-medium;
+    @apply glass-pill;
   }
   .btn {
-    @apply rounded border border-edge bg-white/5 px-3 py-1.5 text-sm font-medium text-ink
-           transition-colors hover:border-signal/50 hover:bg-signal/10
-           disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-edge disabled:hover:bg-white/5;
+    @apply glass-btn;
   }
   .btn-primary {
-    @apply rounded border border-signal/60 bg-signal/15 px-3 py-1.5 text-sm font-semibold
-           text-signal transition-colors hover:bg-signal/25
-           disabled:cursor-not-allowed disabled:opacity-40;
+    @apply glass-btn-primary;
   }
   .mono {
     @apply font-mono text-[12px];
   }
   .scroll {
     scrollbar-width: thin;
-    scrollbar-color: #1B2533 transparent;
+    scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
   }
 }

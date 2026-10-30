@@ -17,6 +17,7 @@ This document tracks all implementation checkpoints, invariants, test gates, and
 | **CP-07** | Optional partner adapters (Socket, TigerGraph, Wispr Flow, Dodo) | `backend/agentcrash/integrations/*` | `pytest tests/test_integrations_module7.py` | **PASSED** |
 | **CP-08** | End-to-end attack -> fix -> replay demo script | `scripts/demo_flow.py`<br>`scripts/run_proof.py` | Real execution output with proof stamp | **PASSED** |
 | **CP-09** | Frontend React Dashboard + Vite Proxy + Full E2E Loop | `frontend/src/*`<br>`frontend/vite.config.ts`<br>`backend/agentcrash/api/app.py` | `npm run typecheck && npm test && npm run build` + live proxy proof | **PASSED** |
+| **CP-10** | Apple-Minimal Glassmorphic UI Redesign (3 Stitch Screens) | `frontend/src/components/*`<br>`frontend/src/App.tsx`<br>`frontend/src/index.css` | 3 dedicated screens (Dashboard, Run Detail, Fix & Replay) with live REST API wiring, sample data removed, exact verified proof banner | **PASSED** |
 
 ---
 

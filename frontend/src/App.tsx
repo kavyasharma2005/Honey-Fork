@@ -1,37 +1,24 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError, api } from "./api";
-import { AttackGraph } from "./components/AttackGraph";
-import { AttackTimeline } from "./components/AttackTimeline";
-import { IntegrationPanel } from "./components/IntegrationPanel";
-import { PolicyLab } from "./components/PolicyLab";
-import { ProofReport } from "./components/ProofReport";
-import { ReplayArena } from "./components/ReplayArena";
-import {
-  Chip,
-  Copyable,
-  Empty,
-  ErrorNote,
-  Panel,
-  Spinner,
-  Stat,
-} from "./components/primitives";
-import { VERDICT_META, formatTime, shortAddress } from "./format";
+import { Header, type ActiveTab } from "./components/Header";
+import { DashboardScreen } from "./components/DashboardScreen";
+import { RunDetailScreen } from "./components/RunDetailScreen";
+import { FixReplayScreen } from "./components/FixReplayScreen";
+import { ResetModal } from "./components/ResetModal";
 import { usePolling } from "./usePolling";
 import type {
-  AdapterResult,
   AgentConfiguration,
   AttackDefinition,
   Comparison,
   Health,
-  IntegrationSummary,
   Policy,
   PolicyTemplate,
   ReplayResult,
-  Report,
   ScanRun,
 } from "./types";
 
 export function App() {
+  const [activeTab, setActiveTab] = useState<ActiveTab>("dashboard");
   const [health, setHealth] = useState<Health | null>(null);
   const [agents, setAgents] = useState<AgentConfiguration[]>([]);
   const [attacks, setAttacks] = useState<AttackDefinition[]>([]);
@@ -39,36 +26,51 @@ export function App() {
   const [runs, setRuns] = useState<ScanRun[]>([]);
   const [fatal, setFatal] = useState<string | null>(null);
 
+  // Scan runner controls
   const [agentId, setAgentId] = useState("");
   const [selectedAttacks, setSelectedAttacks] = useState<string[]>([]);
   const [repeatCount, setRepeatCount] = useState(1);
+  const [isStartingScan, setIsStartingScan] = useState(false);
 
-  const [activeRunId, setActiveRunId] = useState<string | null>(null);
-  const [activeTrials, setActiveTrials] = useState<ScanRun[]>([]);
-  const [selectedTrialId, setSelectedTrialId] = useState<string | null>(null);
+  // Selected run state
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [isResetModalOpen, setIsResetModalOpen] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
 
+  // Policy & Replay state
   const [policy, setPolicy] = useState<Policy | null>(null);
   const [policyNote, setPolicyNote] = useState<string | null>(null);
-  const [policyBusy, setPolicyBusy] = useState(false);
-  const [policyError, setPolicyError] = useState<string | null>(null);
+  const [isProposingPolicy, setIsProposingPolicy] = useState(false);
+  const [isApplyingPolicy, setIsApplyingPolicy] = useState(false);
+  const [isReplaying, setIsReplaying] = useState(false);
 
-  const [replay, setReplay] = useState<ReplayResult | null>(null);
-  const [receipt, setReceipt] = useState<Record<string, unknown> | null>(null);
+  const [replayResult, setReplayResult] = useState<ReplayResult | null>(null);
   const [comparison, setComparison] = useState<Comparison | null>(null);
-  const [report, setReport] = useState<Report | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
 
-  // Optional adapters (SRS 20.6). Status is read once; results are per-run.
-  const [integrations, setIntegrations] = useState<IntegrationSummary | null>(null);
-  const [integrationsError, setIntegrationsError] = useState<string | null>(null);
-  const [integrationBusy, setIntegrationBusy] = useState<string | null>(null);
-  const [integrationResult, setIntegrationResult] = useState<AdapterResult | null>(null);
+  // Notification toast
+  const [notice, setNotice] = useState<{ message: string; type: "info" | "success" | "error" } | null>(null);
+
+  const showNotice = (message: string, type: "info" | "success" | "error" = "info") => {
+    setNotice({ message, type });
+    setTimeout(() => {
+      setNotice((prev) => (prev?.message === message ? null : prev));
+    }, 5000);
+  };
 
   const loadRuns = useCallback(async () => {
-    setRuns(await api.scans(50));
-  }, []);
+    try {
+      const scans = await api.scans(50);
+      setRuns(scans);
+      if (!selectedRunId && scans.length > 0) {
+        // Auto-select latest run if none selected
+        setSelectedRunId(scans[0].run_id);
+      }
+    } catch (err) {
+      console.error("Failed to load runs:", err);
+    }
+  }, [selectedRunId]);
 
+  // Initial load
   useEffect(() => {
     (async () => {
       try {
@@ -82,13 +84,7 @@ export function App() {
         setAgents(a);
         setAttacks(at);
         setTemplates(t);
-        setAgentId((current) => current || (a[0]?.agent_id ?? ""));
-        try {
-          setIntegrations(await api.integrations());
-        } catch (err) {
-          // An unavailable adapter list must not take down the dashboard.
-          setIntegrationsError(err instanceof Error ? err.message : String(err));
-        }
+        setAgentId(a[0]?.agent_id ?? "");
         setSelectedAttacks(at.map((x) => x.attack_id));
         await loadRuns();
       } catch (err) {
@@ -97,692 +93,337 @@ export function App() {
     })();
   }, [loadRuns]);
 
-  const scanActive = usePolling(
-    () => api.trials(activeRunId as string),
-    Boolean(activeRunId),
-    700,
-  );
-
+  // Periodic polling for health
   useEffect(() => {
-    if (!scanActive.data) return;
-    setActiveTrials(scanActive.data);
-    // Auto-select the first trial of a newly opened run, but never carry a
-    // selection across runs: the graph and timeline read the selected trial.
-    setSelectedTrialId((current) =>
-      current && scanActive.data!.some((t) => t.run_id === current)
-        ? current
-        : (scanActive.data![0]?.run_id ?? null),
-    );
-    if (scanActive.data.length >= plannedTrials) {
-      void loadRuns();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scanActive.data]);
+    const timer = setInterval(async () => {
+      try {
+        const h = await api.health();
+        setHealth(h);
+      } catch {
+        /* ignore transient failures */
+      }
+    }, 4000);
+    return () => clearInterval(timer);
+  }, []);
 
-  const plannedTrials = selectedAttacks.length * repeatCount;
-
+  // Polling events for selected run
   const events = usePolling(
-    () => api.events(selectedTrialId as string),
-    Boolean(selectedTrialId),
-    900,
+    () => api.events(selectedRunId as string),
+    Boolean(selectedRunId),
+    1000,
   );
 
-  const selectedTrial = useMemo(
-    () => activeTrials.find((t) => t.run_id === selectedTrialId) ?? null,
-    [activeTrials, selectedTrialId],
+  const selectedRun = useMemo(
+    () => runs.find((r) => r.run_id === selectedRunId) ?? null,
+    [runs, selectedRunId],
   );
 
-  const attackFor = useCallback(
-    (attackId: string | null) => attacks.find((a) => a.attack_id === attackId) ?? null,
-    [attacks],
+  const selectedAttack = useMemo(
+    () => attacks.find((a) => a.attack_id === selectedRun?.attack_id) ?? null,
+    [attacks, selectedRun],
   );
 
-  const templateFor = useCallback(
-    (type: string | null | undefined) => templates.find((t) => t.type === type) ?? null,
-    [templates],
+  const policyTemplate = useMemo(
+    () => templates.find((t) => t.type === policy?.type) ?? null,
+    [templates, policy],
   );
 
-  const guard = async (label: string, fn: () => Promise<void>) => {
-    setBusy(label);
-    setNotice(null);
-    try {
-      await fn();
-    } catch (err) {
-      // FR-UI-06: surface the error as an error, with its stable code.
-      const detail =
-        err instanceof ApiError ? `${err.code}: ${err.message}` : String(err);
-      setNotice(detail);
-    } finally {
-      setBusy(null);
+  // Handlers
+  const handleToggleAttackId = (id: string) => {
+    setSelectedAttacks((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  };
+
+  const handleSelectAllAttacks = () => {
+    if (selectedAttacks.length === attacks.length) {
+      setSelectedAttacks([]);
+    } else {
+      setSelectedAttacks(attacks.map((x) => x.attack_id));
     }
   };
 
-  const startScan = () =>
-    guard("scan", async () => {
+  const handleStartScan = async () => {
+    if (selectedAttacks.length === 0) return;
+    setIsStartingScan(true);
+    try {
       const accepted = await api.startScan({
         agent_id: agentId,
         attack_ids: selectedAttacks,
         repeat_count: repeatCount,
       });
-      setActiveRunId(accepted.run_id);
-      setActiveTrials([]);
-      setSelectedTrialId(null);
-      setPolicy(null);
-      setPolicyNote(null);
-      setReplay(null);
-      setReceipt(null);
-      setComparison(null);
-      setReport(null);
-      setNotice(`Queued ${accepted.run_id} — ${accepted.total_trials} trial(s).`);
-    });
+      showNotice(`Scan accepted (${accepted.run_id}). Running ${accepted.total_trials} trial(s)…`, "info");
 
-  const proposePolicy = (trialId: string) =>
-    guard("propose", async () => {
-      const result = await api.proposePolicy(trialId);
-      setPolicy(result.policy);
-      // FR-PL-06: when nothing maps to a template, say so rather than
-      // substituting a generic rule.
-      setPolicyNote(result.policy ? null : (result.message ?? "No automatic fix is available."));
-      setPolicyError(null);
-    });
+      // Wait a moment then reload runs
+      setTimeout(async () => {
+        await loadRuns();
+        setIsStartingScan(false);
+        if (accepted.run_id) {
+          setSelectedRunId(accepted.run_id);
+        }
+      }, 1500);
+    } catch (err) {
+      setIsStartingScan(false);
+      const msg = err instanceof ApiError ? `${err.code}: ${err.message}` : String(err);
+      showNotice(msg, "error");
+    }
+  };
 
-  const applyPolicy = (target: Policy) =>
-    guard("apply", async () => {
-      setPolicyBusy(true);
-      try {
-        const result = await api.applyPolicy(target.policy_id);
-        setPolicy(result.policy);
-        // The header shows the enforced stack, so it has to be refetched or it
-        // keeps reporting "no policy" after a successful apply.
-        setHealth(await api.health());
-        setNotice(
-          `Applied ${result.policy.type} as policy v${result.policy.version}. Replay to verify.`,
-        );
-      } finally {
-        setPolicyBusy(false);
-      }
-    });
-
-  const runReplay = (trialId: string) =>
-    guard("replay", async () => {
-      const result = await api.replay(trialId, 3);
-      setReplay(result);
-      // FR-RP-03: the receipt is a separate read; a missing one must not fail
-      // the replay the operator just ran.
-      try {
-        setReceipt((await api.receipt(result.replay_run.run_id)).receipt);
-      } catch {
-        setReceipt(null);
-      }
-      setComparison(await api.comparison(trialId, result.replay_run.run_id));
-      await loadRuns();
-    });
-
-  const buildReport = (runId: string) =>
-    guard("report", async () => {
-      const result = await api.createReport([runId]);
-      setReport(result.report);
-    });
-
-  const resetSandbox = () =>
-    guard("reset", async () => {
+  const handleResetSandbox = async () => {
+    setIsResetting(true);
+    try {
       await api.resetSandbox();
       const h = await api.health();
       setHealth(h);
-      setNotice("Sandbox restored to known initial state. Report history was kept.");
-    });
+      await loadRuns();
+      setIsResetModalOpen(false);
+      showNotice("Sandbox environment restored to known initial state.", "success");
+    } catch (err) {
+      const msg = err instanceof ApiError ? `${err.code}: ${err.message}` : String(err);
+      showNotice(msg, "error");
+    } finally {
+      setIsResetting(false);
+    }
+  };
 
-  // Optional adapters (SRS 20.6). Each action reports honestly: when an adapter
-  // is off the result says so, and the panel renders that as "not run".
-  const runIntegration = (adapter: string, arg?: string) =>
-    guard(`integration:${adapter}`, async () => {
-      setIntegrationBusy(adapter);
-      setIntegrationsError(null);
-      try {
-        let result: AdapterResult;
-        if (adapter === "socket") {
-          result = await api.socketPreflight();
-        } else if (adapter === "tigergraph") {
-          if (!activeRunId) throw new Error("Select a run before ingesting.");
-          result = await api.tigergraphIngest(activeRunId);
-        } else if (adapter === "dodo") {
-          result = await api.dodoSummary();
-        } else if (adapter === "wisprflow") {
-          // Voice is a guarded input: this recognises the command and returns it
-          // unconfirmed. It cannot approve a policy or authorise a transfer.
-          result = await api.wisprParse(arg ?? "");
-        } else {
-          throw new Error(`No runner for ${adapter}`);
-        }
-        setIntegrationResult(result);
-      } finally {
-        setIntegrationBusy(null);
+  const handleSelectRun = (runId: string) => {
+    setSelectedRunId(runId);
+    setActiveTab("run-detail");
+  };
+
+  const handleGoToFixReplay = async (runId: string) => {
+    setSelectedRunId(runId);
+    setActiveTab("fix-replay");
+    // Automatically trigger policy proposal for this run if not already proposed
+    try {
+      setIsProposingPolicy(true);
+      const result = await api.proposePolicy(runId);
+      setPolicy(result.policy);
+      setPolicyNote(result.policy ? null : (result.message ?? "No automatic fix is available."));
+      if (result.policy) {
+        showNotice(`Proposed candidate policy: ${result.policy.policy_id}`, "info");
       }
-    });
+    } catch (err) {
+      const msg = err instanceof ApiError ? `${err.code}: ${err.message}` : String(err);
+      showNotice(msg, "error");
+    } finally {
+      setIsProposingPolicy(false);
+    }
+  };
+
+  const handleProposePolicy = async () => {
+    if (!selectedRunId) return;
+    setIsProposingPolicy(true);
+    try {
+      const result = await api.proposePolicy(selectedRunId);
+      setPolicy(result.policy);
+      setPolicyNote(result.policy ? null : (result.message ?? "No automatic fix is available."));
+      if (result.policy) {
+        showNotice(`Proposed candidate policy: ${result.policy.policy_id}`, "info");
+      } else {
+        showNotice(result.message || "No automatic policy fix matches this attack.", "info");
+      }
+    } catch (err) {
+      const msg = err instanceof ApiError ? `${err.code}: ${err.message}` : String(err);
+      showNotice(msg, "error");
+    } finally {
+      setIsProposingPolicy(false);
+    }
+  };
+
+  const handleApplyPolicy = async () => {
+    if (!policy) return;
+    setIsApplyingPolicy(true);
+    try {
+      const result = await api.applyPolicy(policy.policy_id);
+      setPolicy(result.policy);
+      const h = await api.health();
+      setHealth(h);
+      showNotice(
+        `Applied ${result.policy.type} as policy v${result.policy.version}. Policy is now enforced!`,
+        "success",
+      );
+    } catch (err) {
+      const msg = err instanceof ApiError ? `${err.code}: ${err.message}` : String(err);
+      showNotice(msg, "error");
+    } finally {
+      setIsApplyingPolicy(false);
+    }
+  };
+
+  const handleRunReplay = async () => {
+    if (!selectedRunId) return;
+    setIsReplaying(true);
+    try {
+      const result = await api.replay(selectedRunId, 3);
+      setReplayResult(result);
+      try {
+        const comp = await api.comparison(selectedRunId, result.replay_run.run_id);
+        setComparison(comp);
+      } catch (e) {
+        console.warn("Comparison fetch warning:", e);
+      }
+      await loadRuns();
+      if (result.proof_status?.verified) {
+        showNotice("VERIFIED FIX: Attack Blocked · Legitimate Transfer Passed!", "success");
+      } else {
+        showNotice(`Replay finished with status: ${result.proof_status?.label || result.regression.fix_status}`, "info");
+      }
+    } catch (err) {
+      const msg = err instanceof ApiError ? `${err.code}: ${err.message}` : String(err);
+      showNotice(msg, "error");
+    } finally {
+      setIsReplaying(false);
+    }
+  };
+
+  const handleExportReport = async () => {
+    if (!selectedRunId) return;
+    try {
+      const reportRes = await api.createReport([selectedRunId]);
+      await api.exportReport(reportRes.report.report_id);
+      showNotice(`Audit report ${reportRes.report.report_id} exported successfully.`, "success");
+    } catch (err) {
+      const msg = err instanceof ApiError ? `${err.code}: ${err.message}` : String(err);
+      showNotice(msg, "error");
+    }
+  };
+
+  const handleExportRunJson = () => {
+    if (!selectedRun) return;
+    const data = {
+      run: selectedRun,
+      events: events.data ?? [],
+    };
+    api.exportRunJson(data, `run-${selectedRun.run_id}.json`);
+    showNotice(`Run ${selectedRun.run_id} JSON exported.`, "success");
+  };
 
   if (fatal) {
     return (
-      <div className="mx-auto max-w-xl p-8">
-        <Panel title="Backend unavailable">
-          <ErrorNote error={fatal} />
-          <p className="mt-2 text-[12px] text-muted">
-            Start the API with <span className="mono">uvicorn agentcrash.api.app:app</span> and
-            reload.
-          </p>
-        </Panel>
-      </div>
-    );
-  }
-
-  const exploits = activeTrials.filter((t) => t.verdict === "EXPLOIT_SUCCEEDED").length;
-  const blocked = activeTrials.filter((t) => t.verdict === "ATTEMPT_BLOCKED").length;
-  const errors = activeTrials.filter((t) => t.verdict === "TEST_ERROR").length;
-
-  return (
-    <div className="mx-auto max-w-[1400px] p-4">
-      <Header
-        health={health}
-        busy={busy}
-        onReset={resetSandbox}
-      />
-
-      {notice && (
-        <div className="mt-3 rounded border border-edge bg-white/5 px-3 py-2 text-[12px] text-ink/85">
-          {notice}
-        </div>
-      )}
-
-      <div className="mt-3 grid gap-3 lg:grid-cols-[20rem_1fr]">
-        <ScanControls
-          agents={agents}
-          attacks={attacks}
-          agentId={agentId}
-          setAgentId={setAgentId}
-          selected={selectedAttacks}
-          setSelected={setSelectedAttacks}
-          repeatCount={repeatCount}
-          setRepeatCount={setRepeatCount}
-          onStart={startScan}
-          running={busy === "scan"}
-        />
-
-        <div className="space-y-3">
-          <div className="grid gap-2 sm:grid-cols-4">
-            <Stat label="Attacks completed" value={activeTrials.length} hint={`of ${plannedTrials} planned`} />
-            <Stat label="Exploits verified" value={exploits} tone="text-exploit" />
-            <Stat label="Policy blocks" value={blocked} tone="text-signal" />
-            <Stat
-              label="Test errors"
-              value={errors}
-              tone={errors ? "text-policy" : "text-ink"}
-              hint="infrastructure, not security"
-            />
-          </div>
-
-          <Panel
-            title="Trials"
-            actions={
-              activeRunId && (
-                <button
-                  type="button"
-                  className="btn"
-                  disabled={busy === "report"}
-                  onClick={() => buildReport(activeRunId)}
-                >
-                  {busy === "report" ? "Building…" : "Generate report"}
-                </button>
-              )
-            }
-          >
-            {!activeRunId ? (
-              <Empty>No scan running. Choose a suite and run a security test.</Empty>
-            ) : (
-              <TrialsTable
-                trials={activeTrials}
-                planned={plannedTrials}
-                selectedId={selectedTrialId}
-                onSelect={setSelectedTrialId}
-                attackFor={attackFor}
-                onPropose={proposePolicy}
-                onReplay={runReplay}
-                busy={busy}
-              />
-            )}
-          </Panel>
-
-          <AttackGraph
-            run={selectedTrial}
-            attack={attackFor(selectedTrial?.attack_id ?? null)}
-            events={events.data ?? []}
-            onSelect={() => undefined}
-            selectedId={null}
-          />
-
-          <div className="grid gap-3 xl:grid-cols-2">
-            <Panel title="Live attack timeline">
-              <AttackTimeline events={events.data ?? []} />
-            </Panel>
-
-            <PolicyLab
-              policy={policy}
-              unsupportedMessage={policyNote}
-              template={templateFor(policy?.type)}
-              activeVersions={health?.active_policy_versions ?? []}
-              busy={policyBusy || busy === "apply"}
-              error={policyError}
-              onApply={applyPolicy}
-              onCancel={() => {
-                setPolicy(null);
-                setPolicyNote(null);
-                setPolicyError(null);
-              }}
-            />
-          </div>
-
-          <ReplayArena
-            original={selectedTrial}
-            comparison={comparison}
-            replay={replay}
-            receipt={receipt}
-          />
-
-          <ProofReport report={report} />
-
-          <IntegrationPanel
-            summary={integrations}
-            loading={busy === "integrations"}
-            error={integrationsError}
-            onRun={runIntegration}
-            busyAdapter={integrationBusy}
-            result={integrationResult}
-            activeRunId={activeRunId}
-          />
-
-          <RecentRuns
-            runs={runs}
-            onSelect={(runId) => {
-              setActiveRunId(runId);
-              setSelectedTrialId(null);
-              setReplay(null);
-              setReceipt(null);
-              setComparison(null);
-              setPolicy(null);
-              setPolicyNote(null);
-              setReport(null);
-            }}
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Header({
-  health,
-  busy,
-  onReset,
-}: {
-  health: Health | null;
-  busy: string | null;
-  onReset: () => void;
-}) {
-  const sandboxOk = health?.status === "ok";
-  return (
-    <header className="panel flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-      <div className="flex items-center gap-3">
-        <span className="inline-block h-2.5 w-2.5 rounded-full bg-signal" />
-        <div>
-          <h1 className="text-sm font-semibold tracking-wide text-ink">AgentCrash Replay</h1>
-          <p className="text-[11px] text-muted">
-            AI-agent security regression testing · sandbox only
-          </p>
-        </div>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <Chip
-          tone={
-            sandboxOk
-              ? "text-signal border-signal/40 bg-signal/10"
-              : "text-exploit border-exploit/40 bg-exploit/10"
-          }
-        >
-          sandbox {sandboxOk ? "healthy" : "unavailable"}
-        </Chip>
-        {health && (
-          <>
-            <Chip title="Chain identity">
-              chain {health.sandbox.chain_id} · block {health.sandbox.block_number}
-            </Chip>
-            <Chip title="Test token contract">
-              <Copyable
-                value={health.sandbox.token_contract}
-                display={`token ${shortAddress(health.sandbox.token_contract)}`}
-              />
-            </Chip>
-            <Chip
-              tone={
-                health.active_policy_count
-                  ? "text-signal border-signal/40 bg-signal/10"
-                  : "text-muted border-edge bg-white/5"
-              }
-            >
-              {health.active_policy_count
-                ? `policy v${health.active_policy_versions.join(", v")}`
-                : "no policy"}
-            </Chip>
-          </>
-        )}
-        <button
-          type="button"
-          className="btn"
-          disabled={busy === "reset"}
-          onClick={onReset}
-          title="Restore known balances. Historical reports are kept (FR-UI-07)."
-        >
-          {busy === "reset" ? "Resetting…" : "Reset sandbox"}
-        </button>
-      </div>
-    </header>
-  );
-}
-
-function ScanControls({
-  agents,
-  attacks,
-  agentId,
-  setAgentId,
-  selected,
-  setSelected,
-  repeatCount,
-  setRepeatCount,
-  onStart,
-  running,
-}: {
-  agents: AgentConfiguration[];
-  attacks: AttackDefinition[];
-  agentId: string;
-  setAgentId: (value: string) => void;
-  selected: string[];
-  setSelected: (value: string[]) => void;
-  repeatCount: number;
-  setRepeatCount: (value: number) => void;
-  onStart: () => void;
-  running: boolean;
-}) {
-  const toggle = (attackId: string) =>
-    setSelected(
-      selected.includes(attackId)
-        ? selected.filter((x) => x !== attackId)
-        : [...selected, attackId],
-    );
-
-  const agent = agents.find((a) => a.agent_id === agentId);
-
-  return (
-    <div className="space-y-3">
-      <Panel title="Agent configuration">
-        <select
-          className="w-full rounded border border-edge bg-canvas px-2 py-1.5 text-[12px] text-ink"
-          value={agentId}
-          onChange={(event) => setAgentId(event.target.value)}
-        >
-          {agents.map((option) => (
-            <option key={option.agent_id} value={option.agent_id}>
-              {option.name}
-            </option>
-          ))}
-        </select>
-
-        {agent && (
-          <div className="mt-2 space-y-1.5">
-            <p className="text-[11px] text-muted">{agent.description}</p>
-            <div className="flex flex-wrap gap-1">
-              <Chip
-                tone={
-                  agent.guardrail === "none"
-                    ? "text-exploit border-exploit/40 bg-exploit/10"
-                    : "text-signal border-signal/40 bg-signal/10"
-                }
-              >
-                guardrail: {agent.guardrail}
-              </Chip>
-              <Chip>config v{agent.configuration_version}</Chip>
-            </div>
-            <div>
-              <div className="label mt-1">Registered tools</div>
-              <div className="mono mt-0.5 space-y-0.5 text-[11px] text-ink/80">
-                {agent.tool_set.map((tool) => (
-                  <div key={tool}>{tool}</div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-      </Panel>
-
-      <Panel
-        title="Attack suite"
-        actions={
+      <div className="flex min-h-screen items-center justify-center p-6 bg-[#070B12]">
+        <div className="glass-panel p-8 max-w-md text-center border-rose-500/30">
+          <span className="material-symbols-outlined text-4xl text-rose-400 mb-2">error</span>
+          <h2 className="text-lg font-bold text-white">System Initialization Error</h2>
+          <p className="mt-2 text-xs text-slate-300 font-mono">{fatal}</p>
           <button
             type="button"
-            className="text-[11px] text-muted hover:text-signal"
-            onClick={() =>
-              setSelected(
-                selected.length === attacks.length ? [] : attacks.map((a) => a.attack_id),
-              )
-            }
+            onClick={() => window.location.reload()}
+            className="mt-5 rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-xs font-semibold text-white"
           >
-            {selected.length === attacks.length ? "clear" : "all"}
+            Retry Connection
           </button>
-        }
-      >
-        <div className="space-y-1">
-          {attacks.map((attack) => (
-            <label
-              key={attack.attack_id}
-              className="flex cursor-pointer items-start gap-2 rounded border border-edge/60 px-2 py-1.5 hover:border-signal/40"
-            >
-              <input
-                type="checkbox"
-                className="mt-0.5 accent-[#B7FF4A]"
-                checked={selected.includes(attack.attack_id)}
-                onChange={() => toggle(attack.attack_id)}
-              />
-              <span className="min-w-0">
-                <span className="flex items-center gap-1.5">
-                  <span className="mono text-[11px] text-muted">{attack.attack_id}</span>
-                  <span className="text-[12px] text-ink/90">{attack.name}</span>
-                </span>
-                <span className="mt-0.5 block text-[10px] text-muted">
-                  {attack.category} · {attack.severity} · {attack.test_status}
-                </span>
-              </span>
-            </label>
-          ))}
         </div>
-
-        <div className="mt-3 flex items-end gap-2">
-          <label className="flex-1">
-            <span className="label">Trial repeats</span>
-            <input
-              type="number"
-              min={1}
-              max={10}
-              className="mt-1 w-full rounded border border-edge bg-canvas px-2 py-1.5 text-[12px] text-ink"
-              value={repeatCount}
-              onChange={(event) =>
-                setRepeatCount(Math.max(1, Math.min(10, Number(event.target.value) || 1)))
-              }
-            />
-          </label>
-        </div>
-
-        <button
-          type="button"
-          className="btn-primary mt-3 w-full"
-          disabled={running || !agentId || selected.length === 0}
-          onClick={onStart}
-        >
-          {running ? "Starting…" : "Run security test"}
-        </button>
-        <p className="mt-1.5 text-[10px] text-muted">
-          Test accounts and test tokens only. No production keys are used.
-        </p>
-      </Panel>
-    </div>
-  );
-}
-
-function TrialsTable({
-  trials,
-  planned,
-  selectedId,
-  onSelect,
-  attackFor,
-  onPropose,
-  onReplay,
-  busy,
-}: {
-  trials: ScanRun[];
-  planned: number;
-  selectedId: string | null;
-  onSelect: (id: string) => void;
-  attackFor: (id: string | null) => AttackDefinition | null;
-  onPropose: (id: string) => void;
-  onReplay: (id: string) => void;
-  busy: string | null;
-}) {
-  if (!trials.length) {
-    return <Spinner label={`Running… 0 of ${planned} trials complete`} />;
+      </div>
+    );
   }
 
   return (
-    <div className="scroll overflow-x-auto">
-      <table className="w-full text-[12px]">
-        <thead>
-          <tr className="border-b border-edge text-left">
-            <th className="label py-1 pr-2">Attack</th>
-            <th className="label py-1 pr-2">Outcome</th>
-            <th className="label py-1 pr-2">Evidence</th>
-            <th className="label py-1 pr-2">Policy</th>
-            <th className="label py-1 pr-2"></th>
-          </tr>
-        </thead>
-        <tbody>
-          {trials.map((trial) => {
-            const attack = attackFor(trial.attack_id);
-            const meta = trial.verdict ? VERDICT_META[trial.verdict] : null;
-            const canFix = trial.verdict === "EXPLOIT_SUCCEEDED";
-            return (
-              <tr
-                key={trial.run_id}
-                className={`cursor-pointer border-b border-edge/50 hover:bg-white/[0.03] ${
-                  selectedId === trial.run_id ? "bg-white/[0.04]" : ""
-                }`}
-                onClick={() => onSelect(trial.run_id)}
-              >
-                <td className="py-1.5 pr-2">
-                  <div className="mono text-[11px] text-muted">{trial.attack_id}</div>
-                  <div className="text-ink/85">{attack?.name ?? "—"}</div>
-                  {trial.repeat_count > 1 && (
-                    <div className="text-[10px] text-muted">
-                      trial {(trial.trial_index ?? 0) + 1}/{trial.repeat_count}
-                    </div>
-                  )}
-                </td>
-                <td className="py-1.5 pr-2">
-                  {meta ? (
-                    <Chip tone={meta.tone} title={meta.blurb}>
-                      {meta.label}
-                    </Chip>
-                  ) : (
-                    <Chip>{trial.status}</Chip>
-                  )}
-                </td>
-                <td className="py-1.5 pr-2">
-                  {trial.transaction_hashes.length ? (
-                    <Copyable
-                      value={trial.transaction_hashes[0]}
-                      display={shortAddress(trial.transaction_hashes[0], 8, 6)}
-                    />
-                  ) : (
-                    <span className="text-[11px] text-muted">no transaction</span>
-                  )}
-                </td>
-                <td className="py-1.5 pr-2">
-                  <span className="mono text-[11px] text-muted">
-                    {trial.policy_version ? `v${trial.policy_version}` : "none"}
-                  </span>
-                </td>
-                <td className="py-1.5 pr-2 text-right">
-                  {canFix && (
-                    <div className="flex justify-end gap-1">
-                      <button
-                        type="button"
-                        className="btn"
-                        disabled={busy === "propose"}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onPropose(trial.run_id);
-                        }}
-                      >
-                        Propose fix
-                      </button>
-                      <button
-                        type="button"
-                        className="btn"
-                        disabled={busy === "replay"}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onReplay(trial.run_id);
-                        }}
-                      >
-                        Replay ×3
-                      </button>
-                    </div>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+    <div className="min-h-screen bg-[#070B12] text-[#E2E8F0] flex flex-col font-sans selection:bg-rose-500/20 selection:text-rose-300">
+      {/* 1. Frosted Glass Top Navigation Header */}
+      <Header
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        health={health}
+        selectedRunId={selectedRunId}
+        hasProposedPolicy={Boolean(policy && policy.status === "proposed")}
+        onOpenReset={() => setIsResetModalOpen(true)}
+      />
+
+      {/* Floating Apple-style Notification Toast */}
+      {notice && (
+        <div className="fixed top-20 right-6 z-50 animate-slidein">
+          <div
+            className={`flex items-center gap-3 rounded-2xl border px-4 py-3 shadow-2xl backdrop-blur-2xl text-xs font-medium max-w-md ${
+              notice.type === "success"
+                ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-200 shadow-[0_0_25px_rgba(16,185,129,0.2)]"
+                : notice.type === "error"
+                ? "border-rose-500/40 bg-rose-500/15 text-rose-200 shadow-[0_0_25px_rgba(244,63,94,0.2)]"
+                : "border-white/15 bg-white/10 text-white shadow-[0_0_20px_rgba(255,255,255,0.1)]"
+            }`}
+          >
+            <span className="material-symbols-outlined text-[18px]">
+              {notice.type === "success"
+                ? "check_circle"
+                : notice.type === "error"
+                ? "error"
+                : "info"}
+            </span>
+            <span className="leading-snug">{notice.message}</span>
+            <button
+              type="button"
+              onClick={() => setNotice(null)}
+              className="ml-auto opacity-70 hover:opacity-100"
+            >
+              <span className="material-symbols-outlined text-[16px]">close</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Main Container */}
+      <main className="flex-1 mx-auto w-full max-w-7xl p-4 sm:p-6 lg:p-8">
+        {activeTab === "dashboard" && (
+          <DashboardScreen
+            health={health}
+            agents={agents}
+            attacks={attacks}
+            scans={runs}
+            selectedAgentId={agentId}
+            onSelectAgentId={setAgentId}
+            selectedAttackIds={selectedAttacks}
+            onToggleAttackId={handleToggleAttackId}
+            onSelectAllAttacks={handleSelectAllAttacks}
+            repeatCount={repeatCount}
+            onChangeRepeatCount={setRepeatCount}
+            isStartingScan={isStartingScan}
+            onStartScan={handleStartScan}
+            onSelectRun={handleSelectRun}
+            onGoToFixReplay={handleGoToFixReplay}
+            onOpenReset={() => setIsResetModalOpen(true)}
+          />
+        )}
+
+        {activeTab === "run-detail" && (
+          <RunDetailScreen
+            run={selectedRun}
+            events={events.data ?? []}
+            attack={selectedAttack}
+            onGoToFixReplay={handleGoToFixReplay}
+            onBackToDashboard={() => setActiveTab("dashboard")}
+            onExportRunJson={handleExportRunJson}
+          />
+        )}
+
+        {activeTab === "fix-replay" && (
+          <FixReplayScreen
+            originalRun={selectedRun}
+            policy={policy}
+            policyTemplate={policyTemplate}
+            policyNote={policyNote}
+            activeVersions={health?.active_policy_versions ?? []}
+            isProposing={isProposingPolicy}
+            onProposePolicy={handleProposePolicy}
+            isApplying={isApplyingPolicy}
+            onApplyPolicy={handleApplyPolicy}
+            isReplaying={isReplaying}
+            onRunReplay={handleRunReplay}
+            replayResult={replayResult}
+            comparison={comparison}
+            onExportReport={handleExportReport}
+            onBackToDashboard={() => setActiveTab("dashboard")}
+          />
+        )}
+      </main>
+
+      {/* Reset Sandbox Confirmation Modal */}
+      <ResetModal
+        isOpen={isResetModalOpen}
+        onClose={() => setIsResetModalOpen(false)}
+        onConfirm={handleResetSandbox}
+        isResetting={isResetting}
+      />
     </div>
   );
 }
-
-function RecentRuns({
-  runs,
-  onSelect,
-}: {
-  runs: ScanRun[];
-  onSelect: (id: string) => void;
-}) {
-  const parents = runs.filter((run) => !run.parent_run_id).slice(0, 8);
-  return (
-    <Panel title="Recent runs">
-      {parents.length === 0 ? (
-        <Empty>No runs recorded yet.</Empty>
-      ) : (
-        <div className="space-y-1">
-          {parents.map((run) => (
-            <button
-              key={run.run_id}
-              type="button"
-              onClick={() => onSelect(run.run_id)}
-              className="flex w-full items-center justify-between gap-2 rounded border border-edge/60 px-2 py-1.5 text-left hover:border-signal/40"
-            >
-              <span className="mono text-[11px] text-muted">{run.run_id}</span>
-              <span className="text-[11px] text-ink/80">{run.agent_id}</span>
-              <span className="mono text-[11px] text-muted">
-                {run.repeat_count}× · {formatTime(run.started_at)}
-              </span>
-              <Chip>{run.status}</Chip>
-            </button>
-          ))}
-        </div>
-      )}
-    </Panel>
-  );
-}
+export default App;
